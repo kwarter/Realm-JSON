@@ -7,6 +7,7 @@
 //
 
 #import "RLMObject+JSON.h"
+#import "NSObject+Properties.h"
 
 #import <objc/runtime.h>
 
@@ -59,7 +60,8 @@ static NSString *MCTypeStringFromPropertyKey(Class class, NSString *key) {
 }
 
 + (instancetype)createOrUpdateInRealm:(RLMRealm *)realm withJSONDictionary:(NSDictionary *)dictionary {
-	return [self createOrUpdateInRealm:realm withObject:[self mc_createObjectFromJSONDictionary:dictionary]];
+    id obj = [self mc_createObjectFromJSONDictionary:dictionary];
+	return [self createOrUpdateInRealm:realm withObject:obj];
 }
 
 + (instancetype)objectInRealm:(RLMRealm *)realm withPrimaryKeyValue:(id)primaryKeyValue {
@@ -140,16 +142,18 @@ static NSString *MCTypeStringFromPropertyKey(Class class, NSString *key) {
 
 + (id)mc_createObjectFromJSONDictionary:(NSDictionary *)dictionary {
 	NSMutableDictionary *result = [NSMutableDictionary dictionary];
-	NSDictionary *mapping = [[self class] mc_inboundMapping];
-    
     Class modelClass = NSClassFromString([[self class] className]);
-	for (NSString *dictionaryKeyPath in mapping) {
-		NSString *objectKeyPath = mapping[dictionaryKeyPath];
-
-		id value = [dictionary valueForKeyPath:dictionaryKeyPath];
+	for (NSString *remoteKeyPath in dictionary) {
+        NSString *localKeyPath = [self localKeyForRemoteKeyPath:remoteKeyPath];
+        
+        if (!localKeyPath) {
+            continue;
+        }
+		id value = [dictionary valueForKeyPath:remoteKeyPath];
+        
 		if (value) {
             
-			Class propertyClass = [modelClass mc_classForPropertyKey:objectKeyPath];
+			Class propertyClass = [modelClass mc_classForPropertyKey:localKeyPath];
 
 			if ([propertyClass isSubclassOfClass:[RLMObject class]]) {
 				if (!value || [value isEqual:[NSNull null]]) {
@@ -159,7 +163,7 @@ static NSString *MCTypeStringFromPropertyKey(Class class, NSString *key) {
 				value = [propertyClass mc_createObjectFromJSONDictionary:value];
 			}
 			else if ([propertyClass isSubclassOfClass:[RLMArray class]]) {
-                RLMProperty *property = [self mc_propertyForPropertyKey:objectKeyPath];
+                RLMProperty *property = [self mc_propertyForPropertyKey:localKeyPath];
                 Class elementClass = NSClassFromString(property.objectClassName);
                 
                 NSMutableArray *array = [NSMutableArray array];
@@ -169,18 +173,18 @@ static NSString *MCTypeStringFromPropertyKey(Class class, NSString *key) {
                 value = [array copy];
 			}
 			else {
-				NSValueTransformer *transformer = [[self class] mc_transformerForPropertyKey:objectKeyPath];
+				NSValueTransformer *transformer = [[self class] mc_transformerForPropertyKey:localKeyPath];
 
 				if (transformer) {
 					value = [transformer transformedValue:value];
 				}
 			}
             
-            if ([objectKeyPath isEqualToString:@"self"]) {
+            if ([localKeyPath isEqualToString:@"self"]) {
                 return value;
             }
             
-            NSArray *keyPathComponents = [objectKeyPath componentsSeparatedByString:@"."];
+            NSArray *keyPathComponents = [localKeyPath componentsSeparatedByString:@"."];
             id currentDictionary = result;
             for (NSString *component in keyPathComponents) {
                 if ([currentDictionary valueForKey:component] == nil) {
@@ -189,11 +193,33 @@ static NSString *MCTypeStringFromPropertyKey(Class class, NSString *key) {
                 currentDictionary = [currentDictionary valueForKey:component];
             }
 
-			[result setValue:value forKeyPath:objectKeyPath];
+			[result setValue:value forKeyPath:localKeyPath];
 		}
 	}
     
     return [result copy];
+}
+
++ (NSString *)localKeyForRemoteKeyPath:(NSString *)remoteKeyPath {
+    NSDictionary *defaultMapping = [[self class] mc_inboundMapping];
+    if ([defaultMapping valueForKey:remoteKeyPath]) {
+        return defaultMapping[remoteKeyPath];
+    } else if ([self hasPropertyNamed:remoteKeyPath]) {
+        // Try with just the same property name
+        return remoteKeyPath;
+    } else if ([self hasPropertyNamed:remoteKeyPath.camelToSnakeCase]) {
+        return remoteKeyPath.camelToSnakeCase;
+    } else if ([self hasPropertyNamed:remoteKeyPath.snakeToCamelCase]) {
+        return remoteKeyPath.snakeToCamelCase;
+    } else if ([[remoteKeyPath substringWithRange:NSMakeRange(remoteKeyPath.length -1, 1)] isEqual:@"s"]) {
+        NSString *singularRemoteKey = [remoteKeyPath substringToIndex:remoteKeyPath.length-1];
+        if ([self hasPropertyNamed:singularRemoteKey]) {
+            return singularRemoteKey;
+        }
+    } else if ([self hasPropertyNamed:[remoteKeyPath stringByAppendingString:@"s"]]) {
+        return [remoteKeyPath stringByAppendingString:@"s"];
+    }
+    return nil;
 }
 
 - (id)mc_createJSONDictionary {
